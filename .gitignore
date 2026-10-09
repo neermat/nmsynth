@@ -1,0 +1,13 @@
+# Build output
+/nmsynth
+*_build-*
+*.bin
+*.exe
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
