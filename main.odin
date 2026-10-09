@@ -3,6 +3,7 @@ package nmsynth
 import "base:runtime"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:os"
 import "core:time"
 import ma "vendor:miniaudio"
@@ -56,8 +57,8 @@ main :: proc() {
 		buffer  = Buffer{},
 		freq    = 440,
 		phase   = 0,
-		vol     = 0.5,
-		max_vol = 0.75,
+		vol     = 0.25,
+		max_vol = 0.5,
 	}
 
 	// The frequency at which data is delivered to and from a device depends on the
@@ -99,13 +100,50 @@ main :: proc() {
 
 
 	// Program logic here:
-	max_tone :: 20_000
-	tone_freq : f32 = 20
-	for tone_freq < max_tone {
-		fmt.printfln("Playing tone : %.0f Hz", tone_freq)
-		synth.freq = tone_freq
-		tone_freq *= 1.5
-		time.sleep(1e9)
+	// Sweep
+	max_tone :: 15_000
+	tone_freq: f32 = 30
+	play_sweep: bool
+	if play_sweep {
+		for tone_freq < max_tone {
+			fmt.printfln("Playing tone : %.0f Hz", tone_freq)
+			synth.freq = tone_freq
+			tone_freq *= 1.1
+			time.sleep(0.1 * 1e9)
+		}
+	}
+
+	// Musical Scales
+	semitone: f32 = math.pow_f32(2, f32(1/12.0))
+	chromatic_scale_freqs: [12]f32
+	chromatic_scale_freqs[0] = 220
+	for i in 1 ..< len(chromatic_scale_freqs) {
+		chromatic_scale_freqs[i] = chromatic_scale_freqs[i - 1] * semitone
+	}
+
+	// major_scale: [7]int = {0, 2, 4, 5, 7, 9, 11}
+	MajorScaleDegree :: enum {
+	TONIC = 0,
+	SECOND = 2,
+	THIRD = 4,
+	FOURTH = 5,
+	FIFTH = 7,
+	SIXTH = 7,
+	SEVENTH = 9,
+	}
+
+
+	octave_factors: [5]f32 = {1, 2, 4, 8, 16}
+
+	num_octaves :: 2
+	note: MajorScaleDegree
+	octave: int
+	for {
+		note = rand.choice_enum(MajorScaleDegree)
+		octave = rand.int_range(0, num_octaves)
+		synth.freq = chromatic_scale_freqs[note] * octave_factors[octave]
+		fmt.printfln("Note: %v, Octave: %d", note, octave)
+		time.sleep(0.5 * 1e9)
 	}
 
 }
