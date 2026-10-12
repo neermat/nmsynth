@@ -11,8 +11,16 @@ import ma "vendor:miniaudio"
 NUM_CHANNELS :: 2
 SAMPLE_RATE :: 48000
 MAX_SAMPLES :: 512
-MAX_VOLUME :: 0.5
+MAX_VOLUME :: 0.75
+PLUCK_BETA :: 0.2 // 0 -> bridge, 0.5 -> middle of string
 
+
+NUM_HARMONICS :: 10
+AMP_PEAK :: 0.25
+ATTACK :: 0.001
+// TODO: fix glitch around attack - decay transition
+DECAY_B1 :: 1
+DECAY_B3 :: 3e-6
 
 StereoSample :: [2]f32
 Buffer :: struct {
@@ -21,45 +29,125 @@ Buffer :: struct {
 
 Synth :: struct {
 	// User State
-	buffer:  Buffer,
-	freq:    f32,
-	phase:   f32,
-	vol:     f32,
-	max_vol: f32,
+	buffer:     Buffer,
+	time:       f64,
+	max_vol:    f32,
+	pluck_beta: f32,
+	// decay model for nth harmonic : 1/tau_n = decay_b1 + decay_b3 * freq(n)^2
+	decay_b1:   f32, // in 1/s (overall decay)
+	decay_b3:   f32, // in s (b3=0 -> all harmonics decay at same rate)
+	voices:     []Voice,
+}
+
+Voice :: struct {
+	freq:        f32,
+	phase:       f32,
+	time_offset: f64,
+	amp:         f32,
+	amp_peak:    f32,
+	attack:      f32,
+	// attack: linear ramp to amp_peak
+	decay_inv:   f32,
+	// decay: duration when sound attenuates to 1/e = 37%
+	is_active:   bool,
+}
+
+// NOTE: Alive for duration of frame_count samples
+VoiceState :: struct {
+	v_id:             int,
+	afps:             f32,
+	voice_time:       f64,
+	attack_amp_coeff: f32,
+	decay_per_sample: f32,
 }
 
 data_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, frame_count: u32) {
-	// In playback mode copy data to pOutput. In capture mode read data from pInput. In full-duplex mode, both
-	// pOutput and pInput will be valid and you can move data from pInput into pOutput. Never process more than
-	// frameCount frames.
+	// Never process more than frameCount frames.
 	// 				-- from miniaudio docs
-	context = runtime.default_context()
 	synth := (^Synth)(device.pUserData)
+	// if !synth.is_active do return
+	context = runtime.default_context()
 	sr := f32(device.sampleRate)
-	val: f32
-	afps := math.TAU * synth.freq / sr
+	mix_val: f32
 	output_t := ([^]StereoSample)(output)
+	time_step: f64 = 1 / f64(sr)
+	voice_states := make([]VoiceState, len(synth.voices))
+	defer delete(voice_states)
 	for i in 0 ..< frame_count {
-		val := synth.vol * math.sin(synth.phase)
+		// Update all voices
+		val: f32
+		for &voice, v_id in synth.voices {
+			voice_val: f32
+			if i == 0 {
+				voice_states[v_id].v_id = v_id
+				voice_states[v_id].afps = math.TAU * voice.freq / sr
+				voice_states[v_id].attack_amp_coeff = voice.amp_peak / voice.attack
+				voice_states[v_id].decay_per_sample = 1 - voice.decay_inv / sr
+				if voice.phase > math.TAU {
+					voice.phase -= math.TAU
+				}
+			}
+			voice_state := voice_states[v_id]
+			if !voice.is_active {
+				voice_val = 0
+				continue
+			}
+			voice_state.voice_time = voice.time_offset + synth.time
+			voice_val = voice.amp * math.sin(voice.phase)
+			voice.phase += voice_state.afps
+			if f32(voice_state.voice_time) < voice.attack {
+				voice.amp = voice_state.attack_amp_coeff * f32(voice_state.voice_time)
+			} else {
+				voice.amp *= voice_state.decay_per_sample
+				if voice.amp < 1e-5 {
+					voice.amp = 0
+					voice.is_active = false
+				}
+			}
+			val += voice_val
+		}
+		// Update at synth-level
 		val = math.clamp(val, -synth.max_vol, synth.max_vol)
 		output_t[i].x = val
 		output_t[i].y = val
-		synth.phase += afps
+		synth.time += time_step
 	}
-	for synth.phase > math.TAU {
-		synth.phase -= math.TAU
+
+}
+
+
+guitar_synth_setup :: proc(synth: ^Synth, fundamental_freq: f32, amp_peak: f32, attack: f32) {
+	synth.time = 0
+	harm_freq: f32
+	for i in 0 ..< len(synth.voices) {
+		n := i + 1
+		harm_freq = f32(n) * fundamental_freq
+		synth.voices[i] = Voice {
+			freq        = harm_freq,
+			phase       = 0,
+			time_offset = 0,
+			amp         = 0,
+			amp_peak    = math.sin(
+				f32(n) * math.PI * synth.pluck_beta,
+			) * amp_peak / (f32(n) * f32(n) * math.sin(math.PI * synth.pluck_beta)),
+			attack      = attack,
+			decay_inv   = synth.decay_b1 + synth.decay_b3 * harm_freq * harm_freq,
+			is_active   = true,
+		}
 	}
 }
 
 
 main :: proc() {
 	synth: Synth = {
-		buffer  = Buffer{},
-		freq    = 440,
-		phase   = 0,
-		vol     = 0.25,
-		max_vol = 0.5,
+		buffer     = Buffer{},
+		max_vol    = 0.5,
+		pluck_beta = PLUCK_BETA,
+		decay_b1   = DECAY_B1,
+		decay_b3   = DECAY_B3,
 	}
+	voices: [NUM_HARMONICS]Voice
+	synth.voices = voices[:]
 
 	// The frequency at which data is delivered to and from a device depends on the
 	// size of its period. The size of the period can be defined in terms of PCM frames
@@ -101,49 +189,59 @@ main :: proc() {
 
 	// Program logic here:
 	// Sweep
-	max_tone :: 15_000
-	tone_freq: f32 = 30
-	play_sweep: bool
-	if play_sweep {
-		for tone_freq < max_tone {
-			fmt.printfln("Playing tone : %.0f Hz", tone_freq)
-			synth.freq = tone_freq
-			tone_freq *= 1.1
-			time.sleep(0.1 * 1e9)
-		}
-	}
+	// NOTE: STALE
+	// max_tone :: 15_000
+	// tone_freq: f32 = 30
+	// play_sweep: bool
+	// if play_sweep {
+	// 	for tone_freq < max_tone {
+	// 		fmt.printfln("Playing tone : %.0f Hz", tone_freq)
+	// 		synth.freq = tone_freq
+	// 		tone_freq *= 1.1
+	// 		time.sleep(0.1 * 1e9)
+	// 	}
+	// }
 
 	// Musical Scales
-	semitone: f32 = math.pow_f32(2, f32(1/12.0))
+	semitone: f32 = math.pow_f32(2, f32(1 / 12.0))
 	chromatic_scale_freqs: [12]f32
-	chromatic_scale_freqs[0] = 220
+	chromatic_scale_freqs[0] = 55
 	for i in 1 ..< len(chromatic_scale_freqs) {
 		chromatic_scale_freqs[i] = chromatic_scale_freqs[i - 1] * semitone
 	}
 
 	// major_scale: [7]int = {0, 2, 4, 5, 7, 9, 11}
 	MajorScaleDegree :: enum {
-	TONIC = 0,
-	SECOND = 2,
-	THIRD = 4,
-	FOURTH = 5,
-	FIFTH = 7,
-	SIXTH = 7,
-	SEVENTH = 9,
+		TONIC   = 0,
+		SECOND  = 2,
+		THIRD   = 4,
+		FOURTH  = 5,
+		FIFTH   = 7,
+		SIXTH   = 7,
+		SEVENTH = 9,
 	}
 
 
 	octave_factors: [5]f32 = {1, 2, 4, 8, 16}
 
-	num_octaves :: 2
+	beat_type : [5]f32 = {0.125, 0.25, 0.5, 1.0, 2.0}
+	beat_duration : f32 =  1.0
+
+	num_octaves :: 4
 	note: MajorScaleDegree
 	octave: int
+	note_dur : f32
+	note_dur_ns: time.Duration
 	for {
 		note = rand.choice_enum(MajorScaleDegree)
 		octave = rand.int_range(0, num_octaves)
-		synth.freq = chromatic_scale_freqs[note] * octave_factors[octave]
+		note_dur = rand.choice(beat_type[:]) * beat_duration
+		note_dur_ns = time.Duration(note_dur * 1e9)
+		// set synth frequency
+		freq := chromatic_scale_freqs[note] * octave_factors[octave]
+		guitar_synth_setup(&synth, freq, AMP_PEAK, ATTACK)
 		fmt.printfln("Note: %v, Octave: %d", note, octave)
-		time.sleep(0.5 * 1e9)
+		time.sleep(note_dur_ns)
 	}
 
 }

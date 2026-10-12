@@ -11,3 +11,6 @@
 # Editor
 .vscode/
 .idea/
+
+# Exclude pdfs & notes
+reading/
