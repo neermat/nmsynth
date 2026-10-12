@@ -11,13 +11,13 @@ import ma "vendor:miniaudio"
 NUM_CHANNELS :: 2
 SAMPLE_RATE :: 48000
 MAX_SAMPLES :: 512
-MAX_VOLUME :: 0.75
-PLUCK_BETA :: 0.2 // 0 -> bridge, 0.5 -> middle of string
+MAX_VOLUME :: 0.1
+PLUCK_BETA :: 0.15 // 0 -> bridge, 0.5 -> middle of string
 
 
 NUM_HARMONICS :: 10
-AMP_PEAK :: 0.25
-ATTACK :: 0.001
+AMP_PEAK :: 0.7
+ATTACK :: 0.002
 // TODO: fix glitch around attack - decay transition
 DECAY_B1 :: 1
 DECAY_B3 :: 3e-6
@@ -141,7 +141,7 @@ guitar_synth_setup :: proc(synth: ^Synth, fundamental_freq: f32, amp_peak: f32, 
 main :: proc() {
 	synth: Synth = {
 		buffer     = Buffer{},
-		max_vol    = 0.5,
+		max_vol    = MAX_VOLUME,
 		pluck_beta = PLUCK_BETA,
 		decay_b1   = DECAY_B1,
 		decay_b3   = DECAY_B3,
@@ -224,13 +224,13 @@ main :: proc() {
 
 	octave_factors: [5]f32 = {1, 2, 4, 8, 16}
 
-	beat_type : [5]f32 = {0.125, 0.25, 0.5, 1.0, 2.0}
-	beat_duration : f32 =  1.0
+	beat_type: [3]f32 = {0.25, 0.25, 0.5}
+	beat_duration: f32 = 1.0
 
 	num_octaves :: 4
 	note: MajorScaleDegree
 	octave: int
-	note_dur : f32
+	note_dur: f32
 	note_dur_ns: time.Duration
 	for {
 		note = rand.choice_enum(MajorScaleDegree)
